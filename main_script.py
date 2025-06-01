@@ -3,7 +3,21 @@ import keyboard
 import pyautogui
 import time
 from screeninfo import get_monitors
+import threading # For running pystray in a separate thread
+import sys # For sys.exit()
 
+# System Tray Icon
+try:
+    from PIL import Image # Pillow, for loading the icon image
+    import pystray
+    PYSTRAY_AVAILABLE = True
+except ImportError:
+    PYSTRAY_AVAILABLE = False
+    print("WARNING: pystray or Pillow not installed. System tray icon feature will be disabled.")
+    print("To enable, run: pip install pystray Pillow")
+
+# --- CONFIG IMPORTS (key_config, style_config, feature_config) ---
+# (Keep these sections as they were in the previous version)
 # Import from your key configuration file
 try:
     from key_config import (
@@ -50,8 +64,7 @@ try:
 except ImportError:
     print("INFO: Could not import from feature_config.py. Free Mode will be disabled.")
     ENABLE_FREE_MODE = False
-    # Define placeholders if import fails, though they won't be used if ENABLE_FREE_MODE is False
-    FREE_MODE_TOGGLE_KEY = '' 
+    FREE_MODE_TOGGLE_KEY = ''
     MOUSE_MOVE_STEP, SCROLL_STEP = 20, 3
     FREE_MODE_MOUSE_UP, FREE_MODE_MOUSE_DOWN, FREE_MODE_MOUSE_LEFT, FREE_MODE_MOUSE_RIGHT = 'i','k','j','l'
     FREE_MODE_SCROLL_UP, FREE_MODE_SCROLL_DOWN, FREE_MODE_SCROLL_LEFT, FREE_MODE_SCROLL_RIGHT = 'm',',','b','n'
@@ -65,7 +78,7 @@ sub_grid_key_map = get_sub_grid_key_map()
 overlay_window = None
 canvas = None
 overlay_visible = False
-current_mode = "main"  # "main", "sub" (overlay modes)
+current_mode = "main"
 first_char_main = None
 selected_main_cell_rect = None
 
@@ -76,11 +89,11 @@ pending_double_click_info = {
     "is_pending": False, "key_char": None, "time": 0,
     "screen_x": 0, "screen_y": 0, "button": "left"
 }
-_suppressed_keys_in_overlay = set() # For overlay mode key suppression
+_suppressed_keys_in_overlay = set()
 
-# Free Mode State
 free_mode_active = False
-# _suppressed_keys_in_free_mode = set() # For free mode key suppression to prevent auto-repeat actions
+tray_icon_object = None # Will hold the pystray.Icon object
+app_is_exiting = False # Flag to signal threads to stop
 
 # --- Screen Dimensions ---
 try:
@@ -90,7 +103,65 @@ except Exception:
     print("WARNING: screeninfo failed, falling back to pyautogui for screen size.")
     SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
 
-# --- Drawing Functions (Unchanged from previous version) ---
+
+# --- SYSTEM TRAY FUNCTIONS ---
+def on_quit_callback(icon, item):
+    global app_is_exiting, tray_icon_object
+    print("Quit command received from system tray.")
+    app_is_exiting = True
+    if tray_icon_object:
+        tray_icon_object.stop() # Stop the pystray icon's event loop
+
+    # Perform other cleanup (keyboard, tkinter)
+    # This might be better handled in the main finally block,
+    # but signaling is important here.
+    keyboard.unhook_all() # Ensure hooks are removed
+    if overlay_window and overlay_window.winfo_exists():
+        # Schedule Tkinter quit from its own thread if possible,
+        # but since tray might be in main thread, direct quit might be needed.
+        overlay_window.quit() # This should break the mainloop
+
+    # sys.exit(0) # This might be too abrupt if Tkinter hasn't quit yet.
+                 # The main thread should handle exiting after mainloop breaks.
+
+def setup_tray_icon():
+    global tray_icon_object
+    if not PYSTRAY_AVAILABLE:
+        return
+
+    icon_image = None
+    try:
+        # Make sure 'app_icon.png' (or .ico) is in the same directory
+        # or provide the full path.
+        icon_image = Image.open("app_icon.png")
+    except FileNotFoundError:
+        print("WARNING: app_icon.png not found. System tray icon may be missing or default.")
+    except Exception as e:
+        print(f"WARNING: Could not load app_icon.png: {e}")
+
+
+    # Define menu items
+    menu = (pystray.MenuItem('Quit', on_quit_callback),)
+
+    # Create the icon
+    tray_icon_object = pystray.Icon(
+        "GridHelper",  # Name for the icon (shows on hover sometimes)
+        icon=icon_image,      # The PIL.Image object
+        title="Grid Helper",  # Tooltip text
+        menu=menu
+    )
+    print("System tray icon thread starting...")
+    tray_icon_object.run() # This is a blocking call, so it runs in its own thread
+    print("System tray icon thread finished.") # Should only print on explicit stop
+
+
+# --- DRAWING, MOUSE, UI FUNCTIONS (largely unchanged) ---
+# (Copy the draw_grid, draw_main_grid, draw_sub_grid, perform_mouse_click_action,
+#  clear_pending_double_click, create_overlay_window, show_overlay_tk,
+#  hide_overlay_tk, actual_toggle_overlay, toggle_free_mode functions from
+#  the previous version here. They don't need direct changes for the tray icon
+#  itself, but show_overlay_tk and actual_toggle_overlay already handle
+#  free_mode_active state which is good.)
 def draw_grid(cols, rows, width, height, parent_rect_coords=None, is_sub_grid=False):
     global canvas
     if not canvas: return
@@ -127,7 +198,6 @@ def draw_sub_grid(parent_cell_rect):
     x1, y1, x2, y2 = parent_cell_rect
     if canvas: draw_grid(SUB_GRID_COLS, SUB_GRID_ROWS, x2 - x1, y2 - y1, parent_rect_coords=(x1,y1,x2,y2), is_sub_grid=True)
 
-# --- Mouse Action & UI Management (Unchanged from previous version) ---
 def perform_mouse_click_action(target_x, target_y, is_right_click=False):
     global overlay_window, overlay_visible, current_mode, first_char_main, _suppressed_keys_in_overlay
     if overlay_window and overlay_window.winfo_exists() and overlay_window.state() == 'normal':
@@ -154,9 +224,8 @@ def create_overlay_window():
 
 def show_overlay_tk():
     global overlay_visible, current_mode, first_char_main, overlay_window, free_mode_active
-    if free_mode_active: # Showing overlay exits free mode
+    if free_mode_active:
         free_mode_active = False
-        # _suppressed_keys_in_free_mode.clear()
         print("Exited Free Mode (Overlay shown).")
     if not overlay_window or not overlay_window.winfo_exists(): create_overlay_window()
     overlay_visible = True; current_mode = "main"; first_char_main = None
@@ -171,100 +240,81 @@ def hide_overlay_tk():
     if overlay_window and overlay_window.winfo_exists(): overlay_window.withdraw()
 
 def actual_toggle_overlay():
-    global free_mode_active # Add free_mode_active here
+    global free_mode_active
     if overlay_visible:
         if overlay_window and overlay_window.winfo_exists(): overlay_window.after(0, hide_overlay_tk)
-    else: # Overlay is not visible, so we can potentially enter it OR exit free mode
+    else:
         if free_mode_active:
             free_mode_active = False
-            # _suppressed_keys_in_free_mode.clear()
             print("Exited Free Mode (Overlay shown by Alt-toggle).")
-        # Always try to show overlay if Alt is tapped
         if not overlay_window or not overlay_window.winfo_exists(): create_overlay_window()
         if overlay_window and overlay_window.winfo_exists(): overlay_window.after(0, show_overlay_tk)
 
 def toggle_free_mode():
     global free_mode_active, overlay_visible
     if not ENABLE_FREE_MODE: return
-
     free_mode_active = not free_mode_active
     if free_mode_active:
-        if overlay_visible: # If overlay is somehow visible, hide it
-            hide_overlay_tk() # This also clears overlay suppressions
-        # _suppressed_keys_in_free_mode.clear()
+        if overlay_visible: hide_overlay_tk()
         print("Entered Free Mode. Use IJKL for mouse, M,BN for scroll. Press '`' to exit.")
     else:
-        # _suppressed_keys_in_free_mode.clear()
         print("Exited Free Mode.")
 
-# --- Keyboard Event Handler (Modified for Free Mode) ---
+
+# --- KEYBOARD EVENT HANDLERS ---
 def global_key_event_handler(event):
     global g_left_alt_down_for_toggle, g_left_alt_press_timestamp, overlay_visible, free_mode_active
-    global pending_double_click_info
+    global pending_double_click_info, app_is_exiting
+
+    if app_is_exiting: # If app is trying to exit, don't process further key events
+        return
 
     key_name_lower = event.name.lower()
 
-    # 0. Handle Free Mode Toggle Key (only on KEY_DOWN)
+    # Free Mode Toggle Key
     if ENABLE_FREE_MODE and key_name_lower == FREE_MODE_TOGGLE_KEY and event.event_type == keyboard.KEY_DOWN:
         toggle_free_mode()
-        return # Free mode toggle handled
+        return
 
-    # 1. Handle Alt key for overlay toggling (only if Free Mode is NOT active)
+    # Overlay Alt-Toggle (if not in free mode)
     if not free_mode_active and key_name_lower == LEFT_ALT_KEY_NAME:
         if event.event_type == keyboard.KEY_DOWN:
             if not g_left_alt_down_for_toggle:
-                g_left_alt_down_for_toggle = True
-                g_left_alt_press_timestamp = event.time
+                g_left_alt_down_for_toggle = True; g_left_alt_press_timestamp = event.time
         elif event.event_type == keyboard.KEY_UP:
             if g_left_alt_down_for_toggle:
-                if 0.01 < (event.time - g_left_alt_press_timestamp) < 0.7:
-                    actual_toggle_overlay() # This will also exit free_mode if it was active
+                if 0.01 < (event.time - g_left_alt_press_timestamp) < 0.7: actual_toggle_overlay()
             g_left_alt_down_for_toggle = False
-        return # Alt key for overlay handled
-
-    # If Alt was held and another key pressed (and not in free mode)
+        return
     elif not free_mode_active and g_left_alt_down_for_toggle and event.event_type == keyboard.KEY_DOWN and key_name_lower != LEFT_ALT_KEY_NAME:
         g_left_alt_down_for_toggle = False
 
-    # 2. Handle "blind" double-click (only if Free Mode is NOT active and overlay NOT visible)
-    if not free_mode_active and not overlay_visible and \
-       event.event_type == keyboard.KEY_DOWN and pending_double_click_info["is_pending"]:
-        current_input_char_for_map = ' ' if key_name_lower == 'space' else \
-                                     key_name_lower.upper() if len(key_name_lower) == 1 else None
-        if current_input_char_for_map and \
-           current_input_char_for_map == pending_double_click_info["key_char"] and \
+    # Blind Double-Click (if not in free mode and overlay not visible)
+    if not free_mode_active and not overlay_visible and event.event_type == keyboard.KEY_DOWN and pending_double_click_info["is_pending"]:
+        current_input_char_for_map = ' ' if key_name_lower == 'space' else (key_name_lower.upper() if len(key_name_lower) == 1 else None)
+        if current_input_char_for_map and current_input_char_for_map == pending_double_click_info["key_char"] and \
            (event.time - pending_double_click_info["time"]) < DOUBLE_CLICK_INTERVAL:
-            time.sleep(0.05)
-            pyautogui.click(x=pending_double_click_info["screen_x"], y=pending_double_click_info["screen_y"],
-                            button=pending_double_click_info["button"])
-            clear_pending_double_click()
-            return # Double-click handled
-        else:
-            clear_pending_double_click() # Not a valid double click, but don't return yet
+            time.sleep(0.05); pyautogui.click(x=pending_double_click_info["screen_x"], y=pending_double_click_info["screen_y"], button=pending_double_click_info["button"])
+            clear_pending_double_click(); return
+        else: clear_pending_double_click()
 
-    # 3. Handle Free Mode Actions (if active)
-    if ENABLE_FREE_MODE and free_mode_active:
-        if event.event_type == keyboard.KEY_DOWN:
-            # No need for _suppressed_keys_in_free_mode if actions are single-shot
-            # If you want smooth movement on hold, then suppression/threading would be needed.
-            # For now, simple press-action:
-            if key_name_lower == FREE_MODE_MOUSE_UP: pyautogui.move(0, -MOUSE_MOVE_STEP)
-            elif key_name_lower == FREE_MODE_MOUSE_DOWN: pyautogui.move(0, MOUSE_MOVE_STEP)
-            elif key_name_lower == FREE_MODE_MOUSE_LEFT: pyautogui.move(-MOUSE_MOVE_STEP, 0)
-            elif key_name_lower == FREE_MODE_MOUSE_RIGHT: pyautogui.move(MOUSE_MOVE_STEP, 0)
-            elif key_name_lower == FREE_MODE_SCROLL_UP: pyautogui.scroll(SCROLL_STEP)
-            elif key_name_lower == FREE_MODE_SCROLL_DOWN: pyautogui.scroll(-SCROLL_STEP)
-            elif key_name_lower == FREE_MODE_SCROLL_LEFT: pyautogui.hscroll(-SCROLL_STEP) # Horizontal scroll
-            elif key_name_lower == FREE_MODE_SCROLL_RIGHT: pyautogui.hscroll(SCROLL_STEP) # Horizontal scroll
-            # Any other key in free mode is ignored for now
-        return # Free mode key press handled (or ignored)
+    # Free Mode Actions
+    if ENABLE_FREE_MODE and free_mode_active and event.event_type == keyboard.KEY_DOWN:
+        if key_name_lower == FREE_MODE_MOUSE_UP: pyautogui.move(0, -MOUSE_MOVE_STEP)
+        elif key_name_lower == FREE_MODE_MOUSE_DOWN: pyautogui.move(0, MOUSE_MOVE_STEP)
+        elif key_name_lower == FREE_MODE_MOUSE_LEFT: pyautogui.move(-MOUSE_MOVE_STEP, 0)
+        elif key_name_lower == FREE_MODE_MOUSE_RIGHT: pyautogui.move(MOUSE_MOVE_STEP, 0)
+        elif key_name_lower == FREE_MODE_SCROLL_UP: pyautogui.scroll(SCROLL_STEP)
+        elif key_name_lower == FREE_MODE_SCROLL_DOWN: pyautogui.scroll(-SCROLL_STEP)
+        elif key_name_lower == FREE_MODE_SCROLL_LEFT: pyautogui.hscroll(-SCROLL_STEP)
+        elif key_name_lower == FREE_MODE_SCROLL_RIGHT: pyautogui.hscroll(SCROLL_STEP)
+        return
 
-    # 4. If overlay is visible (and not in free mode), pass event to its logic
-    if overlay_visible: # This implies not free_mode_active due to logic in show_overlay_tk/actual_toggle_overlay
+    # Overlay Grid Logic
+    if overlay_visible:
         on_key_event_for_active_overlay_logic(event)
 
-
-# --- Logic for when Overlay is Active (Unchanged from previous version) ---
+# on_key_event_for_active_overlay_logic (unchanged from previous, paste it here)
 def on_key_event_for_active_overlay_logic(event):
     global overlay_visible, current_mode, first_char_main, selected_main_cell_rect, overlay_window
     global _suppressed_keys_in_overlay, pending_double_click_info
@@ -314,10 +364,11 @@ def on_key_event_for_active_overlay_logic(event):
             if overlay_window and overlay_window.winfo_exists(): overlay_window.after(0, draw_main_grid)
             _suppressed_keys_in_overlay.clear()
 
+
 # --- Main Execution ---
 if __name__ == "__main__":
-    print("Starting Script...")
-    # ... (rest of the startup messages, slightly adjusted for Free Mode info)
+    print("Starting Grid Helper...")
+    # (Print startup messages as before)
     print(f"Screen Dimensions: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
     print(f"--- Style Settings (from style_config.py or defaults) ---")
     print(f"  Overlay Alpha: {OVERLAY_ALPHA}, Background: {OVERLAY_BACKGROUND_COLOR}")
@@ -334,34 +385,66 @@ if __name__ == "__main__":
         print("--- Free Mode is DISABLED (via feature_config.py) ---")
     print(f"-----------------------------------------------------------")
     print(f"Main Grid: {MAIN_GRID_ROWS}x{MAIN_GRID_COLS}, Sub Grid: {SUB_GRID_ROWS}x{SUB_GRID_COLS}")
-    print("--- Usage ---")
-    print(f"Tap '{LEFT_ALT_KEY_NAME}' to toggle overlay grid.")
-    if ENABLE_FREE_MODE:
-        print(f"Tap '{FREE_MODE_TOGGLE_KEY}' to toggle Free Mode (mouse/scroll with keys).")
-    print("  (Refer to previous detailed instructions for overlay usage)")
 
 
-    if not main_grid_key_map or not sub_grid_key_map:
-        print("\nKEY_CONFIG WARNING: Key maps are empty or incomplete.")
+    if not main_grid_key_map or not sub_grid_key_map: print("\nKEY_CONFIG WARNING: Key maps empty.")
+    else: print("Key maps loaded.")
+
+    create_overlay_window() # Create Tkinter window (hidden initially)
+    keyboard.hook(global_key_event_handler) # Hook global keyboard events
+    print(f"\nKeyboard hooked. App active. Tray icon should appear if pystray is installed.")
+    print(f"  Toggle Overlay: '{LEFT_ALT_KEY_NAME}'")
+    if ENABLE_FREE_MODE: print(f"  Toggle Free Mode: '{FREE_MODE_TOGGLE_KEY}'")
+
+
+    tray_thread = None
+    if PYSTRAY_AVAILABLE:
+        # Run the tray icon in a separate daemon thread
+        # Daemon threads exit when the main program exits
+        tray_thread = threading.Thread(target=setup_tray_icon, daemon=True)
+        tray_thread.start()
     else:
-        print("Key maps loaded successfully.")
-
-    create_overlay_window()
-    keyboard.hook(global_key_event_handler)
-    print(f"\nKeyboard hooked. Script is active. Tap '{LEFT_ALT_KEY_NAME}' for overlay, '{FREE_MODE_TOGGLE_KEY if ENABLE_FREE_MODE else ''}' for free mode.")
+        print("System tray icon disabled (pystray or Pillow not found).")
 
     try:
+        # Start the Tkinter event loop (this is blocking for the main thread)
         if overlay_window and overlay_window.winfo_exists():
-            overlay_window.mainloop()
+            overlay_window.mainloop() # This will run until overlay_window.quit() is called
+
+        # If mainloop finishes (e.g., from tray quit), ensure app exits cleanly
+        # This part might only be reached if Tkinter was not used or quit early
+        if app_is_exiting and tray_thread and tray_thread.is_alive():
+             print("Waiting for tray thread to finish...")
+             tray_icon_object.stop() # Ensure it's stopped again
+             tray_thread.join(timeout=2) # Wait for tray thread
+
     except KeyboardInterrupt:
         print("\nScript terminated by user (Ctrl+C).")
+        app_is_exiting = True # Signal exit
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
         import traceback
         traceback.print_exc()
+        app_is_exiting = True # Signal exit
     finally:
-        print("Unhooking keyboard and exiting...")
-        keyboard.unhook_all()
+        print("Initiating shutdown sequence...")
+        app_is_exiting = True # Ensure flag is set
+
+        if tray_icon_object:
+            print("Stopping system tray icon...")
+            tray_icon_object.stop()
+        if tray_thread and tray_thread.is_alive():
+            print("Waiting for tray thread to join...")
+            tray_thread.join(timeout=2) # Give it a couple of seconds
+
+        print("Unhooking keyboard...")
+        keyboard.unhook_all() # Crucial for cleanup
+
+        # Tkinter cleanup: If overlay_window.quit() was called, mainloop ends.
+        # If mainloop ended for other reasons or wasn't running, ensure destroy.
         if overlay_window and overlay_window.winfo_exists():
-            overlay_window.quit()
-        print("Script finished.")
+            print("Destroying Tkinter window...")
+            overlay_window.destroy()
+
+        print("Grid Helper finished.")
+        sys.exit(0) # Force exit if anything is lingering

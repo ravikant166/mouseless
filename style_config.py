@@ -1,7 +1,7 @@
 # style_config.py
 
 # --- Overlay Appearance ---
-OVERLAY_ALPHA = 0.4  # Transparency (0.0 = fully transparent, 1.0 = fully opaque)
+OVERLAY_ALPHA = 0.5  # Transparency (0.0 = fully transparent, 1.0 = fully opaque)
 OVERLAY_BACKGROUND_COLOR = "black" # The color of the overlay window/canvas background
 
 # --- Grid Appearance ---
